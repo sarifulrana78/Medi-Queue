@@ -49,6 +49,17 @@ export const auth = betterAuth({
   database: mongodbAdapter(db, {
     client,
   }),
+  advanced: {
+    crossSubDomainCookies: {
+      enabled: false,
+    },
+    defaultCookieAttributes: {
+      secure: true,
+      httpOnly: true,
+      sameSite: "none",
+      partitioned: true,
+    },
+  },
   emailAndPassword: {
     enabled: true,
     requireEmailVerification: false,
