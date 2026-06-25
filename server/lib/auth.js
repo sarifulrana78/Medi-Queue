@@ -66,6 +66,7 @@ export const auth = betterAuth({
   ],
   trustedOrigins: [
     process.env.CLIENT_URL || "http://localhost:5173",
+    "https://medi-queue-one-flame.vercel.app",
     "http://localhost:5173",
     "http://localhost:3000",
   ],
