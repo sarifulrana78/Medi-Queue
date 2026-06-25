@@ -51,6 +51,133 @@ app.get("/api/health", (req, res) => {
 
 // NOTE: mock-google endpoint removed — real Google OAuth via better-auth is now used.
 
+// Custom Google OAuth initiation — stores state in DB, avoids cross-domain cookie issues
+app.get("/api/auth/google/start", async (req, res) => {
+  const { from = "/" } = req.query;
+  const clientURL = process.env.CLIENT_URL || "http://localhost:5173";
+
+  try {
+    // Generate state and code_verifier manually
+    const state = crypto.randomBytes(32).toString("hex");
+    const nonce = crypto.randomBytes(16).toString("hex");
+
+    // Store state in DB with expiry (5 min)
+    await db.collection("oauth_states").insertOne({
+      state,
+      from,
+      createdAt: new Date(),
+      expiresAt: new Date(Date.now() + 5 * 60 * 1000),
+    });
+
+    const callbackURL = `${process.env.BETTER_AUTH_URL || "http://localhost:5000"}/api/auth/google/callback`;
+
+    const params = new URLSearchParams({
+      response_type: "code",
+      client_id: process.env.GOOGLE_CLIENT_ID,
+      redirect_uri: callbackURL,
+      scope: "openid email profile",
+      state,
+      nonce,
+      prompt: "select_account",
+    });
+
+    res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`);
+  } catch (err) {
+    console.error("Google OAuth start error:", err);
+    res.redirect(`${clientURL}/login?error=oauth_failed`);
+  }
+});
+
+// Custom Google OAuth callback — exchanges code, creates user, issues JWT, redirects to client
+app.get("/api/auth/google/callback", async (req, res) => {
+  const { code, state, error } = req.query;
+  const clientURL = process.env.CLIENT_URL || "http://localhost:5173";
+
+  if (error) {
+    return res.redirect(`${clientURL}/login?error=${error}`);
+  }
+
+  try {
+    // Verify state from DB
+    const stateDoc = await db.collection("oauth_states").findOneAndDelete({ state });
+    if (!stateDoc) {
+      return res.redirect(`${clientURL}/login?error=state_mismatch`);
+    }
+
+    const from = stateDoc.from || "/";
+
+    // Exchange code for tokens with Google
+    const callbackURL = `${process.env.BETTER_AUTH_URL || "http://localhost:5000"}/api/auth/google/callback`;
+
+    const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code,
+        client_id: process.env.GOOGLE_CLIENT_ID,
+        client_secret: process.env.GOOGLE_CLIENT_SECRET,
+        redirect_uri: callbackURL,
+        grant_type: "authorization_code",
+      }),
+    });
+
+    const tokenData = await tokenRes.json();
+    if (!tokenData.access_token) {
+      console.error("Token exchange failed:", tokenData);
+      return res.redirect(`${clientURL}/login?error=token_exchange_failed`);
+    }
+
+    // Get user info from Google
+    const userInfoRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    });
+    const googleUser = await userInfoRes.json();
+
+    if (!googleUser.email) {
+      return res.redirect(`${clientURL}/login?error=no_email`);
+    }
+
+    // Upsert user in DB
+    const userCollection = db.collection("user");
+    let user = await userCollection.findOne({ email: googleUser.email });
+
+    if (!user) {
+      const result = await userCollection.insertOne({
+        name: googleUser.name || googleUser.email.split("@")[0],
+        email: googleUser.email,
+        image: googleUser.picture || "",
+        emailVerified: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      user = await userCollection.findOne({ _id: result.insertedId });
+    }
+
+    const userId = user._id.toString();
+
+    // Issue JWT
+    const secret = new TextEncoder().encode(process.env.BETTER_AUTH_SECRET);
+    const jwtToken = await new SignJWT({
+      id: userId,
+      email: user.email,
+      name: user.name,
+      image: user.image,
+    })
+      .setProtectedHeader({ alg: "HS256" })
+      .setIssuedAt()
+      .setExpirationTime("7d")
+      .sign(secret);
+
+    // Redirect to client with token in URL (client stores it in localStorage)
+    const redirectTo = `${clientURL}/auth/callback?token=${encodeURIComponent(jwtToken)}&next=${encodeURIComponent(from)}`;
+    res.redirect(redirectTo);
+
+  } catch (err) {
+    console.error("Google OAuth callback error:", err);
+    res.redirect(`${clientURL}/login?error=callback_failed`);
+  }
+});
+
 // Fetch current logged-in user profile from verification middleware
 app.get("/api/auth/me", verifyJWT, (req, res) => {
   res.json({ user: req.user });

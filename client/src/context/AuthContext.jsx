@@ -83,41 +83,37 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
-  // Real Google OAuth — redirects to Google, then back to /auth/callback
+  // Real Google OAuth — uses custom server endpoint to avoid cross-domain state_mismatch
   const signInWithGoogle = async (from = "/") => {
-    const callbackURL = `${window.location.origin}/auth/callback${from !== "/" ? `?next=${encodeURIComponent(from)}` : ""}`;
-    
-    const res = await authClient.signIn.social({
-      provider: "google",
-      callbackURL: callbackURL,
-    });
-
-    // better-auth v1 returns { data: { url, redirect } } — handle both auto and manual redirect
-    if (res?.data?.url) {
-      window.location.href = res.data.url;
-    } else if (res?.error) {
-      throw new Error(res.error.message || "Google sign-in failed");
-    }
+    const apiURL = import.meta.env.VITE_API_URL || "http://localhost:5000";
+    window.location.href = `${apiURL}/api/auth/google/start?from=${encodeURIComponent(from)}`;
   };
 
-  // Called after Google OAuth redirect completes (from the callback page)
-  const finalizeGoogleLogin = async () => {
+  // Called after Google OAuth redirect completes — token comes in URL param
+  const finalizeGoogleLogin = async (token) => {
     setLoading(true);
     try {
-      // Fetch JWT token using the session cookie set by better-auth
-      const tokenRes = await api.get("/api/auth/jwt-token");
-      const token = tokenRes.data?.token;
-      if (token) {
-        localStorage.setItem("token", token);
+      if (!token) {
+        throw new Error("No authentication token received");
       }
 
-      // Get the current session user
-      const session = await authClient.getSession();
-      const sessionUser = session.data?.user || null;
+      // Save token to localStorage
+      localStorage.setItem("token", token);
+
+      // Decode JWT payload to get user info (no need for extra API call)
+      const payload = JSON.parse(atob(token.split(".")[1]));
+      const sessionUser = {
+        id: payload.id,
+        email: payload.email,
+        name: payload.name,
+        image: payload.image,
+      };
+
       setUser(sessionUser);
       return sessionUser;
     } catch (err) {
       console.error("Failed to finalize Google login:", err);
+      localStorage.removeItem("token");
       throw err;
     } finally {
       setLoading(false);

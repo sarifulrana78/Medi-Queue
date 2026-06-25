@@ -15,7 +15,19 @@ const AuthCallback = () => {
 
     const finalize = async () => {
       try {
-        const sessionUser = await finalizeGoogleLogin();
+        const params = new URLSearchParams(location.search);
+
+        // Check for error from server
+        const error = params.get("error");
+        if (error) {
+          throw new Error(`Authentication failed: ${error}`);
+        }
+
+        // Token comes in URL from our custom Google OAuth callback
+        const token = params.get("token");
+        const next = params.get("next") || "/";
+
+        const sessionUser = await finalizeGoogleLogin(token);
 
         Swal.fire({
           title: "Welcome!",
@@ -27,9 +39,6 @@ const AuthCallback = () => {
           position: "top-end",
         });
 
-        // Redirect to the page the user was trying to visit, or home
-        const params = new URLSearchParams(location.search);
-        const next = params.get("next") || "/";
         navigate(next, { replace: true });
       } catch (err) {
         console.error("Auth callback error:", err);
